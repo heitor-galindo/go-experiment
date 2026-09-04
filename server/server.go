@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 )
 
@@ -69,7 +71,16 @@ func getOnlinePlayerPosition() {
 		}
 	}
 }
-func updatePlayerPosition(m Movement, conn *net.UDPAddr){
+
+func (player *Player) updatePosition(m Movement) {
+	mu.Lock()
+	player.Position.X = m.X
+	player.Position.Y = m.Y
+	mu.Unlock()
+	slog.Debug("Player position updated.", "player_id", player.ID)
+}
+
+func updatePlayerPosition(m Movement, conn *net.UDPAddr) {
 	player := findPlayerById(m.ID)
 	if player != nil {
 		mu.Lock()
@@ -78,21 +89,31 @@ func updatePlayerPosition(m Movement, conn *net.UDPAddr){
 		player.UdpAddress = conn
 		mu.Unlock()
 	}
-	log.Print("Player position updated")
 }
 
-func findPlayerById(id int) *Player {
-	log.Print("Searching for player: ", id)
+func (player *Player) findPlayer() *Player {
+	slog.Debug("Searching player", "player_id", player.ID)
 	mu.RLock()
 	defer mu.RUnlock()
 
 	for _, p := range globalPlayers {
-		if p.ID == id {
-			log.Printf("Player %v found", id)
+		if p.ID == player.ID {
+			slog.Debug("Player found.", "player_id", player.ID)
 			return p
 		}
 	}
-	log.Print("Player not found")
+	slog.Debug("Player not found.", "player_id", player.ID)
+	return nil
+}
+
+func findPlayerById(id int) *Player {
+	mu.RLock()
+	defer mu.RUnlock()
+	for _, p := range globalPlayers {
+		if p.ID == id {
+			return p
+		}
+	}
 	return nil
 }
 
@@ -106,7 +127,7 @@ func countOnlinePlayers() {
 			count++
 		}
 	}
-	log.Printf("Online players: %v", count)
+	slog.Debug("Online players", "player_count", count)
 }
 
 func createNewPlayer(p Player) *Player {
@@ -121,19 +142,23 @@ func createNewPlayer(p Player) *Player {
 	return player
 }
 
-func login(w http.ResponseWriter, req *http.Request) {
-	var p Player
+func (player *Player) changeState(state PlayerState) {
+	mu.Lock()
+	player.State = state
+	mu.Unlock()
+}
 
+func login(w http.ResponseWriter, req *http.Request) {
+
+	var p Player
 	err := json.NewDecoder(req.Body).Decode(&p)
 	if err != nil {
-		log.Panicf("Fail decode player in login error: %v", err)
+		slog.Error("Login error.", "login_error", err, "player_id", p.ID)
 	}
 
-	player := findPlayerById(p.ID)
+	player := p.findPlayer()
 	if player != nil {
-		mu.Lock()
-		player.State = "online"
-		mu.Unlock()
+		player.changeState(Online)
 	} else {
 		player = createNewPlayer(p)
 	}
@@ -144,54 +169,52 @@ func login(w http.ResponseWriter, req *http.Request) {
 	jsonData, _ := json.Marshal(player)
 	fmt.Fprintf(w, "%+v\n", bytes.NewBuffer(jsonData))
 
-	log.Printf("New player joined: %v", player.ID)
+	slog.Debug("New player joined.", "player_id", player.ID)
 	countOnlinePlayers()
 }
 
 func logout(w http.ResponseWriter, req *http.Request) {
-	var id int
-	err := json.NewDecoder(req.Body).Decode(&id)
-	if err != nil {
-		log.Panic(err)
-	}
-
-	p := findPlayerById(id)
-	if p != nil && p.State == "online" {
-		mu.Lock()
-		p.State = "offline"
-		mu.Unlock()
-	}
-	log.Printf("Player ID %v left the game", id)
-
-	w.WriteHeader(200)
 	w.Header().Add("Content-Type", "application/json")
-	jsonData, _ := json.Marshal("logged out")
-	fmt.Fprintf(w, "%v\n", bytes.NewBuffer(jsonData))
-	countOnlinePlayers()
-}
 
-func logoutFromUdp(id int) {
-	p := findPlayerById(id)
-	if p != nil && p.State == "online" {
-		mu.Lock()
-		p.State = "offline"
-		mu.Unlock()
+	var p Player
+	err := json.NewDecoder(req.Body).Decode(&p)
+	if err != nil {
+		slog.Error("Logout error.", "logout_error", err, "player_id", p.ID)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid json payload."})
+		return
 	}
-	log.Printf("Player ID %v left the game", id)
 
+	player := p.findPlayer()
+
+	mu.Lock()
+	if player != nil && player.State == Online {
+		player.State = Offline
+		mu.Unlock()
+
+		slog.Debug("Player logged out.", "player_id", player.ID)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "logged out."})
+	} else {
+		mu.Unlock()
+		
+		slog.Debug("Player not logged.", "player_id", p.ID)
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"status": "you are not logged."})
+	}
 }
 
 func startUDPServer(conn *net.UDPConn) {
 	defer conn.Close()
 
 	buffer := make([]byte, 1024)
+	// loop UDP
 	for {
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			log.Printf("Read error: %v", err)
 		}
-		log.Print(clientAddr.String())
-		
+
 		bufferData := bytes.NewBuffer(buffer[:n])
 		var playerMovement Movement
 		err = json.NewDecoder(bufferData).Decode(&playerMovement)
@@ -199,19 +222,30 @@ func startUDPServer(conn *net.UDPConn) {
 			log.Panicf("Error while decoding movement message: %v", err)
 		}
 
-		updatePlayerPosition(playerMovement, clientAddr)
+		player := Player{ID: playerMovement.ID}
+		player.findPlayer()
+		if player.State == Online {
+			player.updatePosition(playerMovement)
+		}
+
 		getOnlinePlayerPosition()
-		log.Printf("Online player positions: %v\n,", OnlinePlayerPosition)
 		udpPayload, err := json.Marshal(OnlinePlayerPosition)
 		conn.WriteToUDP(udpPayload, clientAddr)
 		if err != nil {
 			log.Printf("Error to send udp message: %v", err)
 		}
 	}
-	
+
 }
 
 func main() {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Level: slog.LevelInfo
+	}
+	handler := slog.NewTextHandler(os.Stdout, opts)
+	logger := slog.New(handler)
+	slog.SetDefault(logger)
 
 	// UDP SERVER
 	log.Print("Starting UDP Server")
@@ -230,5 +264,5 @@ func main() {
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/logout", logout)
 	http.ListenAndServe(":8090", nil) // isso iniciar um net.Listen(tcp)
-	
+
 }
