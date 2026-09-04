@@ -3,12 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
-	"time"
+	// "time"
 )
 
 const serverTCPAddress = "http://100.66.46.4:8090"
@@ -53,31 +54,35 @@ func getLocalUDPPort() *net.UDPAddr {
 
 func initalizePlayer() *Player {
 	return &Player{
-		ID:         rand.IntN(1000),
+		ID: 317,
+		// ID:         rand.IntN(1000),
 		Position:   PlayerPosition{0, 0},
 		UdpAddress: getLocalUDPPort(),
 	}
 }
 
-func login(p *Player) {
+func (player *Player) login() {
 	path, err := url.JoinPath(serverTCPAddress, "login")
 	if err != nil {
 		log.Panic(err)
 	}
-	jsonData, err := json.Marshal(p)
+	jsonData, err := json.Marshal(player)
 	if err != nil {
 		log.Panic(err)
 	}
 
-	log.Printf("Login player: %v", p.ID)
+	log.Printf("Login player: %v", player.ID)
 	resp, err := http.Post(path, contentType, bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Panic(err)
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
-	if resp.StatusCode == 200 {
+	if resp.StatusCode == http.StatusOK {
 		err := json.NewDecoder(resp.Body).Decode(&player)
 		if err != nil {
 			log.Panic(err)
@@ -85,12 +90,12 @@ func login(p *Player) {
 	}
 }
 
-func logout(p *Player) {
+func (player *Player) logout() {
 	path, err := url.JoinPath(serverTCPAddress, "logout")
 	if err != nil {
 		log.Panic(err)
 	}
-	jsonData, err := json.Marshal(p)
+	jsonData, err := json.Marshal(player)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -98,17 +103,22 @@ func logout(p *Player) {
 	if err != nil {
 		log.Panic(err)
 	}
-	defer resp.Body.Close()
-	var logoutResp string
 
-	if resp.StatusCode == 200 {
-		err := json.NewDecoder(resp.Body).Decode(&logoutResp)
-		if err != nil {
-			log.Panic(err)
-		}
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
+
+	var logoutResp map[string]string
+	err = json.NewDecoder(resp.Body).Decode(&logoutResp)
+	if err != nil {
+		log.Print(err)
 	}
-	log.Printf("%+v", &logoutResp)
-
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Error while login out: %v", logoutResp["status"])
+		return
+	}
+	log.Print(logoutResp["status"])
 }
 
 func sendPosition(p *Player) {
@@ -143,12 +153,11 @@ func sendPosition(p *Player) {
 
 func main() {
 	player = initalizePlayer()
-	login(player)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		sendPosition(player)
-	}
-
-	// logout(player)
+	player.login()
+	// ticker := time.NewTicker(5 * time.Second)
+	// defer ticker.Stop()
+	// for range ticker.C {
+	// 	sendPosition(player)
+	// }
+	player.logout()
 }
