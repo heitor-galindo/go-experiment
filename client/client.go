@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
-	// "time"
+	"os"
+	"os/signal"
+	"time"
 )
 
 const serverTCPAddress = "http://100.66.46.4:8090"
@@ -21,11 +24,19 @@ type PlayerPosition struct {
 	Y int `json:"y"`
 }
 
+type PlayerState string
+
+const (
+	Online  PlayerState = "online"
+	Offline PlayerState = "offline"
+)
+
 type Player struct {
 	ID         int            `json:"id"`
 	Color      string         `json:"color"`
 	Position   PlayerPosition `json:"position"`
 	UdpAddress *net.UDPAddr   `json:"udpAddress"`
+	State      PlayerState    `json:"state"`
 }
 
 type Movement struct {
@@ -37,27 +48,19 @@ type Movement struct {
 var player *Player
 var players []Player
 
-func getLocalUDPPort() *net.UDPAddr {
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	if err != nil {
-		log.Panic(err)
-	}
+func initalize() *Player {
 
-	conn, err := net.ListenUDP("udp", addr)
-	if err != nil {
-		log.Panic(err)
-	}
-	defer conn.Close()
+	r := rand.IntN(256)
+	g := rand.IntN(256)
+	b := rand.IntN(256)
+	hexColor := fmt.Sprintf("#%02X%02X%02X", r, g, b)
 
-	return conn.LocalAddr().(*net.UDPAddr)
-}
-
-func initalizePlayer() *Player {
 	return &Player{
-		ID: 317,
-		// ID:         rand.IntN(1000),
+		ID:         rand.IntN(1000),
 		Position:   PlayerPosition{0, 0},
-		UdpAddress: getLocalUDPPort(),
+		State:      Offline,
+		Color:      hexColor,
+		UdpAddress: nil,
 	}
 }
 
@@ -134,6 +137,7 @@ func sendPosition(p *Player) {
 
 	p.Position = PlayerPosition{X: rand.IntN(99), Y: rand.IntN(99)}
 	movement := Movement{ID: p.ID, X: p.Position.X, Y: p.Position.Y}
+	log.Printf("New posiition: %v", movement)
 
 	message, err := json.Marshal(movement)
 	_, err = conn.Write(message)
@@ -152,12 +156,22 @@ func sendPosition(p *Player) {
 }
 
 func main() {
-	player = initalizePlayer()
+	player := initalize()
 	player.login()
-	// ticker := time.NewTicker(5 * time.Second)
-	// defer ticker.Stop()
-	// for range ticker.C {
-	// 	sendPosition(player)
-	// }
-	player.logout()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+		player.logout()
+		os.Exit(0)
+	}()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		sendPosition(player)
+	}
+
+	// player.logout() // teste manual
 }
