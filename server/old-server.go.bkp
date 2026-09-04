@@ -1,0 +1,85 @@
+package old
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"net"
+	"slices"
+	"strconv"
+	"strings"
+)
+
+type Coordinates struct {
+	X, Y int
+}
+
+var clientList []int
+
+func main() {
+	log.Print("Starting server...")
+	listening, err := net.Listen("tcp", ":8099")
+	if err != nil {
+		log.Fatal("Error listening:", err)
+	}
+	defer listening.Close()
+	for {
+		conn, err := listening.Accept()
+		if err != nil {
+			log.Println("Error accepting conn:", err)
+			continue
+		}
+		clientId := len(clientList) + 1
+		clientList = append(clientList, clientId)
+		log.Printf("Current connections: %v", len(clientList))
+		go handleConnection(conn, clientId)
+	}
+}
+
+func sendMessage(conn net.Conn, messageContent string) {
+	fmt.Fprintf(conn, "%s\n", messageContent)
+}
+
+func dropClient(conn net.Conn, clientId int) {
+	idx := slices.Index(clientList, clientId)
+	if idx != -1 {
+		clientList = slices.Delete(clientList, idx, idx+1)
+	}
+	go sendMessage(conn, fmt.Sprintf("Player %v left the game.", clientId))
+	log.Printf("Current connections: %v", len(clientList))
+}
+
+func handleConnection(conn net.Conn, clientId int) {
+	defer conn.Close()
+	defer dropClient(conn, clientId)
+
+	reader := bufio.NewReader(conn)
+	for {
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		playerPosition, err := parseCoordinates(message)
+		if err != nil {
+			log.Fatal(err)
+		}
+		messageContent := fmt.Sprintf("Your new position is: %v", playerPosition)
+		go sendMessage(conn, messageContent)
+	}
+}
+
+func parseCoordinates(s string) (Coordinates, error) {
+	parts := strings.Split(s, ",")
+	if len(parts) != 2 {
+		return Coordinates{}, fmt.Errorf("expected X,Y")
+	}
+	x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return Coordinates{}, err
+	}
+	y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return Coordinates{}, err
+	}
+	return Coordinates{X: x, Y: y}, nil
+}

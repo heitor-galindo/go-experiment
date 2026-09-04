@@ -1,0 +1,99 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+type Coordinates struct {
+	X, Y int
+}
+
+func main() {
+	log.Print("Starting client...")
+	conn, err := net.Dial("tcp", ":8099")
+	if err != nil {
+		log.Fatal("Error connecting:", err)
+	}
+	log.Printf("Connected to server: %v", conn.RemoteAddr().String())
+	defer conn.Close()
+	go readResponse(conn)
+
+	for {
+		playerInput()
+		playerPosition, err := movePlayer(playerPosition)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("You moved to: %+v\n", playerPosition)
+		sendMessage(conn, playerPosition)
+	}
+}
+
+func readResponse(conn net.Conn) {
+	reader := bufio.NewReader(conn)
+	for {
+		serverMessage, err := reader.ReadString('\n')
+		if err != nil {
+			log.Println("Server disconnected.")
+			return
+		}
+		match, _ := regexp.MatchString("PLAYER_POSITION", serverMessage)
+		if match {
+			go movePlayer(strings.Split(serverMessage, ":"))
+		}
+	}
+}
+
+func movePlayer(position []string){
+
+}
+
+
+func sendMessage(conn net.Conn, playerPosition Coordinates) error {
+	fmt.Printf("Sending coordinates: X:%d Y:%d\n", playerPosition.X,playerPosition.Y)
+	payload, err := json.Marshal(playerPosition)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(append(payload, '\n'))
+	return err
+}
+
+func playerInput() (Coordinates, error) {
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Println("Insert your new position X,Y: ")
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return Coordinates{}, err
+		}
+		return Coordinates{}, io.EOF
+	}
+	return parseCoordinates(scanner.Text())
+}
+
+func parseCoordinates(s string) (Coordinates, error) {
+	parts := strings.Split(s, ",")
+	if len(parts) != 2 {
+		return Coordinates{}, fmt.Errorf("expected X,Y")
+	}
+	x, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return Coordinates{}, err
+	}
+	y, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return Coordinates{}, err
+	}
+	return Coordinates{X: x, Y: y}, nil
+}
